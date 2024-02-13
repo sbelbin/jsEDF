@@ -7,25 +7,22 @@ var bytes = UInt8Array(); //Acquired some how (e.g. from input-file or server-ba
 
 var edf = new EDF(bytes);
 
-console.log("DateTime:", edf.date, edf.time);
-console.log("Duration:", edf.duration, "seconds");
-console.log("Has annotations:", edf.has_annotations);
-console.log("Channel count:", edf.realChannelCount);
+console.log("DateTime:", edf.recordingStartDate, edf.recordingStartTime);
+console.log("Duration:", edf.recordingDuration, "seconds");
+console.log("Has annotations:", edf.hasAnnotations);
+console.log("Signals count:", edf.signals.length);
 
-for (var i = 0; i<edf.realChannelCount; i++)
-{
-   console.log("> ", i, edf.channels[i].label);
-}
+edf.signals.forEach((signal, index) => console.log("> ", index, edf.channels[i].label));
 
 var startSecond = 1;
 var lengthSeconds = 5;
 
-//Reading data from all channels [[], [], []] 
-var data = edf.read(startSecond, lengthSeconds);
+//Reading data from all channels [[], [], []]
+var data = edf.getAllSignalsSamplesInRange(startSecond, lengthSeconds);
 
 var channelIndex = 1;
 //Reading data from one channel
-var singleChannelData = edf.readSingleChannel(channelIndex, startSecond, lengthSeconds);
+var singleChannelData = edf.getSignalSamplesInRange(channelIndex, startSecond, lengthSeconds);
 ```
 
 **Demo**

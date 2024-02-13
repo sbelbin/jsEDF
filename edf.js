@@ -1,231 +1,229 @@
-function arrayToAscii(array, start, length)
-{
-	var str = "";
-	for (var i = 0; i<length; i++)
-	{
-		str += String.fromCharCode(array[start+i]);
+function flip_bits(value) {
+	return parseInt(value.toString(2).split('').map(bit => 1 - bit).join(''), 2);
+}
+
+function sample_value_endian(bytes) {
+	const value = (bytes.length == 1) ? bytes[0]
+		        : (bytes.length == 2) ? (bytes[1] << 8) + bytes[0]
+			    : (bytes.length == 3) ? (bytes[2] << 16) + (bytes[1] << 8) + bytes[0]
+				: (bytes.length == 4) ? (bytes[3] << 32) + (bytes[2] << 16) + (bytes[1] << 8) + bytes[0]
+				: undefined;
+
+	if (value && bytes[bytes.length - 1] >> 7 == 1) {
+		value = -flip_bits(value) - 1;
 	}
-	return str.trim();
+
+	return value;
 }
 
-function flipBits(n) 
+function computeCoefficient(signal)
 {
-  return parseInt(n.toString(2).split('').map(bit => 1 - bit).join(''),2)
+	return (signal.physicalMaximum - signal.physicalMinimum) / (signal.digitalMaximum - signal.digitalMinimum);
 }
 
-class EDF
+function allocateSignals(count)
 {
-	constructor(uint8array)
-	{
-		var pos = 0;
-		
-		var buf = uint8array;
-		this.bytes = uint8array;
-		
-		this.header = arrayToAscii(buf, pos, 8); pos += 8;
-		this.patient = arrayToAscii(buf, pos, 80); pos += 80;
-		this.info = arrayToAscii(buf, pos, 80); pos += 80;
-		this.date = arrayToAscii(buf, pos, 8); pos += 8;
-		this.time = arrayToAscii(buf, pos, 8); pos += 8;
-		this.header_bytes = arrayToAscii(buf, pos, 8); pos += 8;
-		this.data_format = arrayToAscii(buf, pos, 44); pos += 44;
-		this.data_records = parseInt(arrayToAscii(buf, pos, 8)); pos += 8;
-		this.data_record_duration = parseFloat(arrayToAscii(buf, pos, 8)); pos += 8;
-		this.channelCount = parseInt(arrayToAscii(buf, pos, 4)); pos += 4;
-		
-		this.duration = this.data_record_duration*this.data_records;
-		this.bytes_per_sample = this.header == "0" ? 2 : 3;
-		this.has_annotations = false;
-		
-		var n = this.channelCount;
-		
-		
-		
-		this.channels = [];
-		for (var i = 0; i<n; i++)
+	let signals = [];
+	for (var index = 0; index < count; index++) {
+		let signal = new Object();
+		signal.records = [];
+		signals.push(signal);
+	}
+
+	return signals;
+}
+
+function extractSignalSamplesInRange(signal, range)
+{
+	let records = signal.records.slice(range.from, range.until);
+	let samples = [];
+
+	records.forEach((record) => samples.push(...record));
+
+	return samples;
+}
+
+class EDFParser {
+	constructor(uint8array) {
+		this.array = uint8array
+		this.byteOffset = 0
+	}
+
+	readBytes(length) {
+		if (this.byteOffset + length > this.array.byteLength)
 		{
-			var channel = new Object();
-			channel.label = arrayToAscii(buf, pos, 16); pos += 16;
-			channel.data = [];
-			
-			console.log("CHANNEL", i, channel.label);
-			if (channel.label.indexOf("DF Annotations")>0)
-			{
-				this.has_annotations = true;
-				
+			return null;
+		}
+
+		const value = this.array.slice(this.byteOffset, this.byteOffset + length);
+		this.byteOffset += length;
+		return value;
+	}
+
+	readText(length) {
+		const data = this.readBytes(length);
+
+		if (!data) {
+			return null;
+		}
+
+		const decoder = new TextDecoder();
+		let value = decoder.decode(data);
+		value = value?.trim();
+
+		return value;
+	}
+
+	readInt16(length = 8) {
+		const text = this.readText(length);
+		return parseInt(text);
+	}
+
+	readInt8(length = 4) {
+		const text = this.readText(length);
+		return parseInt(text);
+	}
+
+	readFloat32(length = 8) {
+		const text = this.readText(length);
+		return parseFloat(text);
+	}
+
+	readSampleValue(bitsSize) {
+		const useLittleEndian = true;
+		const data_view = new DataView(this.array.buffer, this.byteOffset, this.array.byteLength - this.byteOffset);
+
+		let value = undefined;
+
+		switch(bitsSize) {
+			case 8:
+				value = data_view.getInt8(0, useLittleEndian);
+				break;
+
+			case 16:
+				value = data_view.getInt16(0, useLittleEndian);
+				break;
+
+			case 24:
+				value = data_view.getInt16(0, useLittleEndian);
+				value << 8;
+				value += data_view.getInt8(2, useLittleEndian);
+				break;
+		}
+
+		this.byteOffset += (bitsSize / 8);
+		return value
+	}
+}
+
+class EDF {
+	constructor(uint8array) {
+		const parser = new EDFParser(uint8array);
+
+		this.version = parser.readText(8);
+		this.patient = parser.readText(80);
+		this.recordingIdentification = parser.readText(80);
+		this.recordingStartDate = parser.readText(8);
+		this.recordingStartTime = parser.readText(8);
+		this.headerBytesSize = parser.readText(8);
+		this.reserved = parser.readText(44); // EDF is 32 whereas EDF++ is 44.
+
+		this.dataRecordsCount = parser.readInt16();
+		this.dataRecordDuration = parser.readInt16();
+		this.recordingDuration = this.dataRecordDuration * this.dataRecordsCount;
+
+		const signalsCount = parser.readInt8();
+
+		this.signals = allocateSignals(signalsCount);
+		this.signals.forEach((signal) => signal.label = parser.readText(16) );
+		this.signals.forEach((signal) => signal.transducer = parser.readText(80) );
+		this.signals.forEach((signal) => signal.dimensions = parser.readText(8) );
+		this.signals.forEach((signal) => signal.physicalMinimum = parser.readInt16() );
+		this.signals.forEach((signal) => signal.physicalMaximum = parser.readInt16() );
+		this.signals.forEach((signal) => signal.digitalMinimum = parser.readInt16() );
+		this.signals.forEach((signal) => signal.digitalMaximum = parser.readInt16() );
+		this.signals.forEach((signal) => signal.preFilters = parser.readText(80) );
+		this.signals.forEach((signal) => signal.samplesCountPerRecord = parser.readInt16() );
+		this.signals.forEach((signal) => signal.reserved = parser.readBytes(32) );
+
+		this.signals.forEach((signal) => signal.coefficient = computeCoefficient(signal) );
+
+		this.hasAnnotations = false;
+		let annotationsCount = 0;
+
+		this.signals.forEach((signal) => {
+			signal.hasAnnotations = (signal.label.indexOf("DF Annotations") > 0);
+
+			if (signal.hasAnnotations) {
+				annotationsCount++;
+				this.hasAnnotations = true;
 			}
-			this.channels.push(channel);
-		}
-		
-		console.log("CHANNELS", n);
-		
-		this.realChannelCount = n;
-		if (this.has_annotations)
-		{
-			this.realChannelCount --;
-		}		
-		
-		this.annotation_bytes = 0;
-		
-		console.log("REAL CHANNELS", this.realChannelCount);
-		
-		for (var i = 0; i<n; i++)
-		{
-			this.channels[i].transducer = arrayToAscii(buf, pos, 80); pos += 80;
-		}
-		
-		for (var i = 0; i<n; i++)
-		{
-			this.channels[i].dimensions = arrayToAscii(buf, pos, 8); pos += 8;
-		}
-		
-		for (var i = 0; i<n; i++)
-		{
-			this.channels[i].phys_min = parseInt(arrayToAscii(buf, pos, 8)); pos += 8;
-		}
-		
-		for (var i = 0; i<n; i++)
-		{
-			this.channels[i].phys_max = parseInt(arrayToAscii(buf, pos, 8)); pos += 8;
-		}
-		
-		for (var i = 0; i<n; i++)
-		{
-			this.channels[i].digital_min = parseInt(arrayToAscii(buf, pos, 8)); pos += 8;
-		}
-		
-		for (var i = 0; i<n; i++)
-		{
-			this.channels[i].digital_max = parseInt(arrayToAscii(buf, pos, 8)); pos += 8;
-		}
-		
-		for (var i = 0; i<n; i++)
-		{
-			this.channels[i].prefilters = arrayToAscii(buf, pos, 80); pos += 80;
-		}
-		
-		for (var i = 0; i<n; i++)
-		{
-			this.channels[i].num_samples = parseInt(arrayToAscii(buf, pos, 8)); pos += 8;
-			if (this.has_annotations && i == this.realChannelCount)
-			{
-				this.annotation_bytes = this.channels[i].num_samples*2;
-			}
-		}
-		
-		for (var i = 0; i<n; i++)
-		{
-			/*edf["channels"][i].reserved = arrayToAscii(buf, pos, 32);*/ 
-			this.channels[i].k = (this.channels[i].phys_max - this.channels[i].phys_min)/(this.channels[i].digital_max - this.channels[i].digital_min);
-			console.log("F for", i, this.channels[i].k);
-			pos += 32; 
-		}
-		
-		
-		this.sampling_rate = this.channels[0].num_samples*this.data_record_duration;		
-		this.sample_size = 0;		
-		
-		console.log("ANN BYTES", this.annotation_bytes);
-		
-		if (this.has_annotations)
-		{
-			this.sample_size = (n-1)*2*this.sampling_rate + 60*2;
-		}
-		else
-		{
-			this.sample_size = (n)*2*this.sampling_rate;
-		}
-		
-		var duration = (buf.length - pos)/this.sample_size;		
-		
-		this.headerOffset = pos;
-			
-		this.samples_in_one_data_record = this.sampling_rate*this.data_record_duration;
-	
-					
-		for (var j = 0; j<this.data_records; j++)
-		{
-			for (var i = 0; i<this.realChannelCount; i++)
-			{	
-				var koef = this.channels[i].k;
-				
-				
-				for (var k = 0; k<this.samples_in_one_data_record; k++)
-				{					
-					if (this.bytes_per_sample == 2)
-					{
-						var b1 = buf[pos]; pos++;
-						var b2 = buf[pos]; pos++;						
-											
-						var val = (b2 << 8) + b1;
-			
-						if (b2 >> 7 == 1)
-						{				
-							val = -flipBits(val)-1;	
-						}
-						this.channels[i].data.push(val*koef);
-					}
-					else if (this.bytes_per_sample == 3)
-					{
-						var b1 = buf[pos]; pos++;
-						var b2 = buf[pos]; pos++;						
-						var b3 = buf[pos]; pos++;						
-											
-						var val = (b3 << 16) + (b2 << 8) + b1;
-			
-						if (b3 >> 7 == 1)
-						{				
-							val = -flipBits(val)-1;	
-						}
-						this.channels[i].data.push(val*koef);
-					}
+		});
+
+		this.annotationBytesSize = 0;
+
+		if (this.hasAnnotations) {
+			this.samplingsCount += 60 * 2;
+
+			this.signals.forEach((signal) => {
+				if (signal.hasAnnotations) {
+					this.annotationBytesSize += signal.samplesCountPerRecord * 2;
 				}
+			});
+		}
+
+		const sampleValueInBits = this.version == "0" ? 16 : 24;
+
+		for (var recordIndex = 0; recordIndex < this.dataRecordsCount; recordIndex++) {
+			this.signals.forEach((signal) => {
+				if (signal.hasAnnotations) {
+					const annotation = parser.readText(this.annotationBytesSize);
+					console.log("Annotation: ", annotation)
+				} else {
+					let samples = [];
+					for (var sampleIndex = 0; sampleIndex < signal.samplesCountPerRecord; sampleIndex++) {
+						const value = parser.readSampleValue(sampleValueInBits);
+						samples.push(value * signal.coefficient);
+					}
+					signal.records.push(samples);
+				}
+			});
+		}
+
+		let samplesCountPerRecordMaximum = 0;
+		this.signals.forEach((signal) => samplesCountPerRecordMaximum = Math.max(samplesCountPerRecordMaximum, signal.samplesCountPerRecord));
+		this.samplingRate = this.recordingDuration / samplesCountPerRecordMaximum;
+	}
+
+	computeSamplesRange(timeOffset, duration) {
+		const startRecordsOffset = Math.floor(timeOffset / this.dataRecordDuration);
+		const recordsCount = Math.ceil(duration / this.dataRecordDuration);
+		const finishRecordsOffset = startRecordsOffset + recordsCount;
+
+		const range = {};
+		range.from = Math.min(startRecordsOffset, this.dataRecordsCount);
+		range.until = Math.min(finishRecordsOffset, this.dataRecordsCount);
+
+		return range;
+	}
+
+	getSignalSamplesInRange(signalsIndex, timeOffset, duration) {
+		const range = this.computeSamplesRange(timeOffset, duration);
+
+		return extractSignalSamplesInRange(this.signals[signalsIndex], range);
+	}
+
+	getAllSignalsSamplesInRange(timeOffset, duration) {
+		const range = this.computeSamplesRange(timeOffset, duration);
+
+		let signalsSamples = [];
+
+		this.signals.forEach((signal) => {
+			if (!signal.hasAnnotations) {
+				signalsSamples.push(extractSignalSamplesInRange(signal, range));
 			}
-			
-			if (this.has_annotations)
-			{
-			    var ann = arrayToAscii(buf, pos, this.annotation_bytes); pos+=this.annotation_bytes;
-				console.log("ANN",ann); 
-			}
-		}
-		
+		});
+
+		return signalsSamples;
 	}
-	
-	readSingleChannel(channel, startSecond, lengthSeconds)
-	{
-		var startSample = startSecond*this.sampling_rate;
-		var endSample = startSample + lengthSeconds*this.sampling_rate;
-		
-		if (endSample > this.maxSample)
-		{
-			endSample = this.maxSample;
-		}
-		
-		var data = [];
-		
-		var ch = this.channels[channel].data;
-		for (var i = startSample; i<endSample; i++)
-		{
-			data.push(ch[i]);
-		}
-		
-		return data;
-	}
-	
-	
-	read(startSecond, lengthSeconds)
-	{
-		var array = [];
-		
-		console.log(this.realChannelCount, "REAL");
-		
-		for (var i = 0; i<this.realChannelCount; i++)
-		{
-			array.push(this.readSingleChannel(i, startSecond, lengthSeconds));
-		}
-		
-		return array;
-	}
-	
-	
 }
